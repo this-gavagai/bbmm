@@ -1,5 +1,5 @@
 import { DL, BBMM_README_UUID } from './settings.js';
-import { hlp_esc, hlp_timestampStr, hlp_saveJSONFile, hlp_pickLocalJSONFile, hlp_normalizePresetName, hlp_injectHeaderHelpButton } from './helpers.js';
+import { hlp_esc, hlp_timestampStr, hlp_saveJSONFile, hlp_pickLocalJSONFile, hlp_normalizePresetName, hlp_injectHeaderHelpButton, hlp_getLockedIds } from './helpers.js';
 import { LT, BBMM_ID } from "./localization.js";
 const MODULE_SETTING_PRESETS = "modulePresetsUser";  // { [name]: string[] }  enabled module ids
 
@@ -154,10 +154,14 @@ async function hlp_savePreset(name, modules) {
 	}
 
 	const p = hlp_getPresets();
-	p[finalName] = modules;
+	// Locked modules belong to this world: never written from here, and an
+	// overwritten preset keeps whatever it already had for them
+	const locks = hlp_getLockedIds();
+	const kept = (p[finalName] ?? []).filter(id => locks.has(id));
+	p[finalName] = [...modules.filter(id => !locks.has(id)), ...kept];
 	await hlp_setPresets(p);
 	DL(`module-presets.js | hlp_savePreset(): saved presets: `, p);
-	return { status: "saved", name: finalName };
+	return { status: "saved", name: finalName, count: p[finalName].length };
 }
 
 // Sanitize a { [name]: string[] } preset map
@@ -354,10 +358,14 @@ async function showImportIssuesDialog({ unknown, depIssues }) {
 // Apply a set of enabled ids -> update core.moduleConfiguration 
 async function applyEnabledIds(enabledIds, {autoEnableDeps = true} = {}) {
 	const config = hlp_getModuleConfig();
+	// Locked modules keep their current state; locked-on ones count as requested so their deps are pulled in
+	const locks = hlp_getLockedIds();
+	enabledIds = [...enabledIds.filter(id => !locks.has(id)), ...[...locks].filter(id => config[id] === true)];
+	const blocked = [];
 
 	// Start by disabling everything we manage (only modules, not systems)
 	for (const m of game.modules.values()) {
-		config[m.id] = false;
+		if (!locks.has(m.id)) config[m.id] = false;
 	}
 	// Enable requested
 	for (const id of enabledIds) {
@@ -375,6 +383,11 @@ async function applyEnabledIds(enabledIds, {autoEnableDeps = true} = {}) {
 				if (!mod) continue;
 				const requires = hlp_getRequiredIds(mod);
 				for (const depId of requires) {
+					// A locked dep not already enabled is locked off: report it, don't enable it
+					if (locks.has(depId) && !toEnable.has(depId)) {
+						if (!blocked.some(b => b.id === id && b.depId === depId)) blocked.push({ id, depId });
+						continue;
+					}
 					if (game.modules.has(depId) && !toEnable.has(depId)) {
 						toEnable.add(depId);
 						config[depId] = true;
@@ -386,6 +399,7 @@ async function applyEnabledIds(enabledIds, {autoEnableDeps = true} = {}) {
 	}
 
 	await game.settings.set("core", "moduleConfiguration", config);
+	return { blocked };
 }
 
 // Open a preview dialog showing which modules a preset will enable
@@ -396,10 +410,13 @@ function ui_openModulePresetPreview(preset) {
 		const esc = hlp_esc;
 		const enabledIds = new Set(Array.isArray(preset?.modules) ? preset.modules : []);
 
-		// Every installed module, marked enabled/disabled per the preset
+		// Every installed module, marked enabled/disabled per the preset (locked ones keep their current state)
+		const locks = hlp_getLockedIds();
+		const config = hlp_getModuleConfig();
 		const rows = [];
 		for (const m of game.modules) {
-			rows.push({ id: m.id, title: m.title || m.id, state: enabledIds.has(m.id) ? "enabled" : "disabled" });
+			const on = locks.has(m.id) ? config[m.id] === true : enabledIds.has(m.id);
+			rows.push({ id: m.id, title: m.title || m.id, state: on ? "enabled" : "disabled", locked: locks.has(m.id) });
 		}
 		// Preset ids that aren't installed anymore
 		for (const id of enabledIds) {
@@ -426,7 +443,7 @@ function ui_openModulePresetPreview(preset) {
 			const nameColor = r.state === "missing" ? "color:#f55;" : "";
 			return `<div style="${ROW_STYLE}">
 				<div style="${ICON_CELL}">${ICONS[r.state]}</div>
-				<div style="${CELL_STYLE}${nameColor}" title="${esc(r.id)}">${esc(r.title)}</div>
+				<div style="${CELL_STYLE}${nameColor}" title="${esc(r.id)}">${esc(r.title)}${r.locked ? ` <i class="fa-solid fa-lock" style="color:orange;" title="${esc(LT.moduleManagement.lockBlocked())}"></i>` : ""}</div>
 			</div>`;
 		}).join("");
 
@@ -599,7 +616,7 @@ function _mp_wire(container, getIndex, rerender) {
 						const res = await hlp_savePreset(newName, enabled);
 						if (res?.status !== "saved") return;
 
-						ui.notifications.info(`${LT.savedSummary({ name: res.name, count: enabled.length })}.`);
+						ui.notifications.info(`${LT.savedSummary({ name: res.name, count: res.count })}.`);
 						rerender();
 						return;
 					}
@@ -625,7 +642,8 @@ function _mp_wire(container, getIndex, rerender) {
 							await showImportIssuesDialog({ unknown, depIssues });
 						}
 
-						await applyEnabledIds(enabled, { autoEnableDeps: true });
+						const { blocked } = await applyEnabledIds(enabled, { autoEnableDeps: true });
+						if (blocked.length) await showImportIssuesDialog({ unknown: [], depIssues: blocked });
 
 						const reload = await foundry.applications.api.DialogV2.confirm({
 							window: { title: LT.titleReloadFoundry() },
@@ -646,7 +664,7 @@ function _mp_wire(container, getIndex, rerender) {
 						const res = await hlp_savePreset(picked.name, enabled);
 						if (res?.status !== "saved") return;
 
-						ui.notifications.info(`${LT.updatedSummary({ name: picked.name, count: enabled.length })}.`);
+						ui.notifications.info(`${LT.updatedSummary({ name: picked.name, count: res.count })}.`);
 						rerender();
 						return;
 					}

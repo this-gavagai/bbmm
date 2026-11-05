@@ -125,6 +125,16 @@ export function isExcludedWith(skipMap, namespace, key) {
 	return !!(key && val instanceof Set && val.has(key));
 }
 
+/* Module ids locked in this world (bbmm.moduleLocks is world-scoped) */
+export function hlp_getLockedIds() {
+	try {
+		const raw = game.settings.get(BBMM_ID, "moduleLocks");
+		return new Set(Array.isArray(raw) ? raw : []);
+	} catch {
+		return new Set();
+	}
+}
+
 /* ==========================================================================
 	Help / Manual button injection (DialogV2 + other Apps)
 ========================================================================== */

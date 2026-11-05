@@ -944,6 +944,18 @@ async function svc_savePresetToSettings(presetName, selectedEntries) {
     }
 }
 
+/* Inactive modules can't report their settings, so an overwritten preset
+   keeps whatever it already had for them ============================== */
+function hlp_keepInactiveModuleSettings(prev, payload) {
+    for (const scope of ["world", "client", "user"]) {
+        for (const [ns, entries] of Object.entries(prev?.[scope] ?? {})) {
+            if (ns === "core" || ns === game.system.id || game.modules.get(ns)?.active) continue;
+            payload[scope] ??= {};
+            payload[scope][ns] ??= foundry.utils.deepClone(entries);
+        }
+    }
+}
+
 /* Save Settings Preset with conflict resolution ====================== */
 async function svc_saveSettingsPreset(name, payload) {
     const rawInput = String(name).trim();
@@ -970,6 +982,8 @@ async function svc_saveSettingsPreset(name, payload) {
             finalName = newName;
         }
     }
+
+    hlp_keepInactiveModuleSettings(all[finalName], storedPayload);
 
     // Preserve "entries" flattening behavior
     const flatView = hlp_normalizeToEntries(storedPayload)?.entries ?? [];
@@ -1257,6 +1271,8 @@ async function svc_savePlayerSettingsPreset(name, payload) {
             finalName = newName;
         }
     }
+
+    hlp_keepInactiveModuleSettings(all[finalName], storedPayload);
 
     // Preserve "entries" flattening behavior
     const flatView = hlp_normalizeToEntries(storedPayload)?.entries ?? [];
